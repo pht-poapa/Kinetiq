@@ -2,7 +2,8 @@ import unittest
 from types import SimpleNamespace
 
 from exercises import EXERCISES
-from pose_analysis import choose_side, joint_angle, update_position
+from pose_analysis import choose_side, joint_angle
+from repetition_counter import new_counter, track_repetition
 
 
 def make_landmarks(joints, visibility = 1):
@@ -16,17 +17,56 @@ def make_landmarks(joints, visibility = 1):
 
 
 def count_repetitions(angles, settings):
-    position = 'waiting'
-    repetitions = 0
+    counter = new_counter()
+    frame = 0
 
     for angle in angles:
-        position, completed = update_position(angle, position, settings)
-        repetitions += completed
+        for index in range(15):
+            track_repetition(angle, frame / 30, counter, settings)
+            frame += 1
 
-    return repetitions
+    return len(counter['report'])
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_single_frame_spike_is_not_a_repetition(self):
+        for settings in EXERCISES.values():
+            counter = new_counter()
+            angles = [175] * 20 + [settings['bent_angle'] - 10] + [175] * 20
+
+            for frame, angle in enumerate(angles):
+                track_repetition(angle, frame / 30, counter, settings)
+
+            self.assertEqual(counter['report'], [])
+
+    def test_report_and_frame_rate_independence(self):
+        for fps in [15, 30, 60]:
+            for settings in EXERCISES.values():
+                counter = new_counter()
+
+                for frame in range(fps * 3):
+                    time = frame / fps
+                    angle = settings['bent_angle'] - 10 if 1 <= time < 2 else 175
+                    track_repetition(angle, time, counter, settings)
+
+                self.assertEqual(len(counter['report']), 1)
+                row = counter['report'][0]
+                self.assertEqual(row['rep'], 1)
+                self.assertGreater(row['end_seconds'], row['start_seconds'])
+                self.assertAlmostEqual(row['duration_seconds'], row['end_seconds'] - row['start_seconds'], places = 2)
+                self.assertEqual(row['min_angle_degrees'], settings['bent_angle'] - 10)
+
+    def test_tracking_loss_keeps_finished_repetitions_only(self):
+        counter = new_counter()
+        settings = EXERCISES['Squat']
+        phases = [175, 80, 175, 80, None, 175]
+
+        for phase, angle in enumerate(phases):
+            for frame in range(20):
+                track_repetition(angle, (phase * 20 + frame) / 30, counter, settings)
+
+        self.assertEqual(len(counter['report']), 1)
+
     def test_counting_for_each_exercise(self):
         for exercise, settings in EXERCISES.items():
             extended = settings['extended_angle'] + 5

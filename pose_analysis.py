@@ -1,4 +1,3 @@
-from pathlib import Path
 import math
 
 import cv2
@@ -6,6 +5,8 @@ import imageio.v2 as imageio
 import mediapipe as mp
 
 from exercises import EXERCISES
+from repetition_counter import new_counter, track_repetition
+from model_setup import ensure_model
 
 
 CONNECTIONS = [
@@ -46,6 +47,8 @@ def joint_angle(landmarks, joints, width, height):
     start, middle, end = [landmarks[index] for index in joints]
 
     for point in [start, middle, end]:
+        if not all(math.isfinite(value) for value in [point.x, point.y, point.visibility, point.presence]):
+            return None
         if point.visibility < 0.5 or point.presence < 0.5:
             return None
         if not (0 <= point.x < 1 and 0 <= point.y < 1):
@@ -80,17 +83,10 @@ def choose_side(landmarks, settings, width, height):
     return best_side
 
 
-def update_position(angle, position, settings):
-    if angle is None:
-        return 'waiting', 0
-    if angle > settings['extended_angle']:
-        return 'extended', int(position == 'bent')
-    if angle < settings['bent_angle'] and position == 'extended':
-        return 'bent', 0
-    return position, 0
+def analyze_video(input_path, output_path, exercise = 'Squat', side = 'Auto', progress = None):
+    if exercise not in EXERCISES:
+        raise ValueError('Choose one of the supported exercises.')
 
-
-def analyze_video(input_path, output_path, exercise = 'Squat', side = 'Auto'):
     settings = EXERCISES[exercise]
 
     if side not in ['Auto', 'Left', 'Right']:
@@ -98,28 +94,39 @@ def analyze_video(input_path, output_path, exercise = 'Squat', side = 'Auto'):
     if exercise == 'Biceps curl (single arm)' and side == 'Auto':
         raise ValueError('Choose the working arm for single-arm curls.')
 
-    model_path = Path(__file__).parent / 'models' / 'pose_landmarker_lite.task'
+    model_path = ensure_model()
+
     base_options = mp.tasks.BaseOptions(model_asset_path = str(model_path))
     options = mp.tasks.vision.PoseLandmarkerOptions(base_options = base_options, running_mode = mp.tasks.vision.RunningMode.VIDEO)
 
     total_frames = 0
     detected_frames = 0
     last_timestamp = -1
-    repetitions = 0
-    position = 'waiting'
+    counter = new_counter()
+    measured_frames = 0
     tracked_side = None if side == 'Auto' else side.lower()
     angles = []
 
     with imageio.get_reader(str(input_path), format = 'FFMPEG') as reader:
-        fps = reader.get_meta_data()['fps']
+        metadata = reader.get_meta_data()
+        fps = metadata['fps']
+        duration = metadata.get('duration', 0)
 
         if not math.isfinite(fps) or fps <= 0:
             raise ValueError('The video has an invalid frame rate.')
+        if duration > 120:
+            raise ValueError('Please upload a video of at most 2 minutes.')
 
         with mp.tasks.vision.PoseLandmarker.create_from_options(options) as landmarker:
             with imageio.get_writer(str(output_path), fps = fps, codec = 'libx264') as writer:
                 for index, frame in enumerate(reader):
-                    frame = frame.copy()
+                    if index / fps >= 120:
+                        raise ValueError('Please upload a video of at most 2 minutes.')
+
+                    height, width = frame.shape[:2]
+                    scale = min(1, 960 / max(height, width))
+                    size = (max(16, round(width * scale / 16) * 16), max(16, round(height * scale / 16) * 16))
+                    frame = cv2.resize(frame, size)
                     height, width = frame.shape[:2]
                     timestamp = max(round(index * 1000 / fps), last_timestamp + 1)
                     last_timestamp = timestamp
@@ -140,8 +147,11 @@ def analyze_video(input_path, output_path, exercise = 'Squat', side = 'Auto'):
 
                         frame = draw_pose(frame, landmarks)
 
-                    position, completed = update_position(angle, position, settings)
-                    repetitions += completed
+                    if angle is not None:
+                        measured_frames += 1
+
+                    angle = track_repetition(angle, index / fps, counter, settings)
+                    repetitions = len(counter['report'])
                     angles.append({'time': index / fps, 'angle': angle})
 
                     joint = settings['joint']
@@ -152,7 +162,14 @@ def analyze_video(input_path, output_path, exercise = 'Squat', side = 'Auto'):
                     writer.append_data(frame)
                     total_frames += 1
 
+                    if progress is not None and (index % max(1, round(fps / 2)) == 0):
+                        fraction = min(0.99, total_frames / fps / duration) if duration > 0 and math.isfinite(duration) else 0
+                        progress(fraction, total_frames / fps)
+
     if total_frames == 0:
         raise ValueError('The video contains no readable frames.')
 
-    return {'exercise': exercise, 'side': tracked_side, 'total_frames': total_frames, 'detected_frames': detected_frames, 'repetitions': repetitions, 'angles': angles}
+    if progress is not None:
+        progress(1.0, total_frames / fps)
+
+    return {'exercise': exercise, 'side': tracked_side, 'source': 'video', 'total_frames': total_frames, 'detected_frames': detected_frames, 'measured_frames': measured_frames, 'duration': total_frames / fps, 'repetitions': len(counter['report']), 'report': counter['report'], 'angles': angles}

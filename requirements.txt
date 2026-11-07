@@ -1,4 +1,6 @@
-streamlit
-mediapipe
-opencv-python
-imageio[ffmpeg]
+streamlit==1.67.0
+mediapipe==1.2.2
+opencv-contrib-python==5.0.0.93
+imageio==2.38.1
+imageio-ffmpeg==0.8.1
+numpy==2.5.4
