@@ -1,3 +1,9 @@
+.venv/
+__pycache__/
+.env
+uploads/
+results/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
