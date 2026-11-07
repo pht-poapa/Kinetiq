@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import streamlit as st
 
 from pose_analysis import analyze_video
+from exercises import EXERCISES
 
 
 def clear_results():
@@ -16,11 +17,16 @@ st.set_page_config(page_title = 'Kinetiq', page_icon = '🏋️', layout = 'cent
 st.title('Kinetiq')
 st.write('Understand your movement. Improve your form.')
 
-exercise = st.selectbox('Choose your exercise', ['Squat'])
+exercise = st.selectbox('Choose your exercise', list(EXERCISES), on_change = clear_results)
+settings = EXERCISES[exercise]
+side_options = ['Left', 'Right'] if exercise == 'Biceps curl (single arm)' else ['Auto', 'Left', 'Right']
+side = st.selectbox('Side to track', side_options, on_change = clear_results)
+st.caption('Left and right refer to your own body, not the screen. For curls, choose the working arm. Auto keeps the first clearly visible side.')
 
 st.subheader('Record your video')
-st.write('Film yourself from the side, keep your entire body visible, and keep the camera still.')
-st.caption('Start standing. Use a short MP4 video with one person and 3–5 repetitions.')
+st.write(settings['instructions'])
+st.caption('Keep the camera still. Use a short MP4 video with one person and 3–5 repetitions.')
+st.info(settings['movement'])
 
 video = st.file_uploader('Upload your workout video', type = ['mp4'], on_change = clear_results)
 
@@ -29,7 +35,7 @@ if video is not None:
     st.video(video)
     st.write(f'Selected exercise: {exercise}')
 
-    if st.button('Analyze squats', type = 'primary'):
+    if st.button('Analyze exercise', type = 'primary'):
         clear_results()
 
         with st.spinner('Processing your video...'):
@@ -38,7 +44,7 @@ if video is not None:
                 output_path = Path(temporary_directory) / 'output.mp4'
 
                 input_path.write_bytes(video.getvalue())
-                analysis = analyze_video(input_path, output_path)
+                analysis = analyze_video(input_path, output_path, exercise, side)
                 processed_video = output_path.read_bytes()
 
         st.session_state['analysis'] = analysis
@@ -48,22 +54,30 @@ if video is not None:
         analysis = st.session_state['analysis']
         processed_video = st.session_state['processed_video']
 
-        st.subheader('Squat analysis')
+        st.subheader(f'{exercise} analysis')
         st.video(processed_video)
         st.metric('Completed repetitions', analysis['repetitions'])
-        st.caption('Counts standing → knee angle below 100° → standing above 160°. These are prototype thresholds, not a form assessment.')
+        bent_angle = settings['bent_angle']
+        extended_angle = settings['extended_angle']
+        joint = settings['joint']
+        st.caption(f'{joint} angle: above {extended_angle}° → below {bent_angle}° → above {extended_angle}°. Prototype thresholds, not a form assessment.')
+
+        if analysis['side'] is not None:
+            tracked_side = analysis['side'].title()
+            st.write(f'Tracked side: {tracked_side}')
 
         detection_rate = analysis['detected_frames'] / analysis['total_frames']
         st.metric('Frames with a detected person', f'{detection_rate:.0%}')
-        st.caption('Detection coverage is not accuracy. Missing leg landmarks interrupt the current repetition.')
+        st.caption('Detection coverage is not accuracy. Missing tracked landmarks interrupt the current repetition.')
 
-        st.subheader('Knee angle over time')
-        st.line_chart(analysis['angles'], x = 'time', y = 'angle', x_label = 'Time (seconds)', y_label = 'Knee angle (degrees)')
+        st.subheader(f'{joint} angle over time')
+        st.line_chart(analysis['angles'], x = 'time', y = 'angle', x_label = 'Time (seconds)', y_label = f'{joint} angle (degrees)')
 
         if analysis['detected_frames'] == 0:
             st.warning('No person was detected. Try a brighter video with your entire body visible.')
         elif all(row['angle'] is None for row in analysis['angles']):
-            st.warning('The hip, knee and ankle were not visible enough to measure the angle.')
+            st.warning('The selected joints were not visible enough to measure the angle. Check the camera view and tracked side.')
 
         st.caption('The exported video has no audio.')
-        st.download_button('Download annotated video', data = processed_video, file_name = 'kinetiq_squats.mp4', mime = 'video/mp4', on_click = 'ignore')
+        video_name = exercise.lower().replace(' ', '_').replace('(', '').replace(')', '')
+        st.download_button('Download annotated video', data = processed_video, file_name = f'kinetiq_{video_name}.mp4', mime = 'video/mp4', on_click = 'ignore')

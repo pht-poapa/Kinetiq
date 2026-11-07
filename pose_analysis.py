@@ -5,6 +5,8 @@ import cv2
 import imageio.v2 as imageio
 import mediapipe as mp
 
+from exercises import EXERCISES
+
 
 CONNECTIONS = [
     (11, 12),
@@ -40,17 +42,17 @@ def draw_pose(frame, landmarks):
     return frame
 
 
-def knee_angle(landmarks, leg, width, height):
-    hip, knee, ankle = [landmarks[index] for index in leg]
+def joint_angle(landmarks, joints, width, height):
+    start, middle, end = [landmarks[index] for index in joints]
 
-    for point in [hip, knee, ankle]:
+    for point in [start, middle, end]:
         if point.visibility < 0.5 or point.presence < 0.5:
             return None
         if not (0 <= point.x < 1 and 0 <= point.y < 1):
             return None
 
-    first = ((hip.x - knee.x) * width, (hip.y - knee.y) * height)
-    second = ((ankle.x - knee.x) * width, (ankle.y - knee.y) * height)
+    first = ((start.x - middle.x) * width, (start.y - middle.y) * height)
+    second = ((end.x - middle.x) * width, (end.y - middle.y) * height)
     length = math.hypot(*first) * math.hypot(*second)
 
     if length == 0:
@@ -61,17 +63,41 @@ def knee_angle(landmarks, leg, width, height):
     return math.degrees(math.acos(cosine))
 
 
-def update_position(angle, position):
+def choose_side(landmarks, settings, width, height):
+    best_side = None
+    best_score = -1
+
+    for side in ['left', 'right']:
+        joints = settings[side]
+
+        if joint_angle(landmarks, joints, width, height) is not None:
+            score = min(min(landmarks[i].visibility, landmarks[i].presence) for i in joints)
+
+            if score > best_score:
+                best_side = side
+                best_score = score
+
+    return best_side
+
+
+def update_position(angle, position, settings):
     if angle is None:
         return 'waiting', 0
-    if angle > 160:
-        return 'up', int(position == 'down')
-    if angle < 100 and position == 'up':
-        return 'down', 0
+    if angle > settings['extended_angle']:
+        return 'extended', int(position == 'bent')
+    if angle < settings['bent_angle'] and position == 'extended':
+        return 'bent', 0
     return position, 0
 
 
-def analyze_video(input_path, output_path):
+def analyze_video(input_path, output_path, exercise = 'Squat', side = 'Auto'):
+    settings = EXERCISES[exercise]
+
+    if side not in ['Auto', 'Left', 'Right']:
+        raise ValueError('Choose Auto, Left or Right for the tracked side.')
+    if exercise == 'Biceps curl (single arm)' and side == 'Auto':
+        raise ValueError('Choose the working arm for single-arm curls.')
+
     model_path = Path(__file__).parent / 'models' / 'pose_landmarker_lite.task'
     base_options = mp.tasks.BaseOptions(model_asset_path = str(model_path))
     options = mp.tasks.vision.PoseLandmarkerOptions(base_options = base_options, running_mode = mp.tasks.vision.RunningMode.VIDEO)
@@ -81,7 +107,7 @@ def analyze_video(input_path, output_path):
     last_timestamp = -1
     repetitions = 0
     position = 'waiting'
-    leg = None
+    tracked_side = None if side == 'Auto' else side.lower()
     angles = []
 
     with imageio.get_reader(str(input_path), format = 'FFMPEG') as reader:
@@ -106,25 +132,20 @@ def analyze_video(input_path, output_path):
                         landmarks = result.pose_landmarks[0]
                         detected_frames += 1
 
-                        if leg is None:
-                            left = [23, 25, 27]
-                            right = [24, 26, 28]
-                            left_score = min(min(landmarks[i].visibility, landmarks[i].presence) for i in left)
-                            right_score = min(min(landmarks[i].visibility, landmarks[i].presence) for i in right)
+                        if tracked_side is None:
+                            tracked_side = choose_side(landmarks, settings, width, height)
 
-                            if max(left_score, right_score) >= 0.5:
-                                leg = left if left_score >= right_score else right
-
-                        if leg is not None:
-                            angle = knee_angle(landmarks, leg, width, height)
+                        if tracked_side is not None:
+                            angle = joint_angle(landmarks, settings[tracked_side], width, height)
 
                         frame = draw_pose(frame, landmarks)
 
-                    position, completed = update_position(angle, position)
+                    position, completed = update_position(angle, position, settings)
                     repetitions += completed
                     angles.append({'time': index / fps, 'angle': angle})
 
-                    angle_text = 'Knee angle: unavailable' if angle is None else f'Knee angle: {angle:.0f} deg'
+                    joint = settings['joint']
+                    angle_text = f'{joint} angle: unavailable' if angle is None else f'{joint} angle: {angle:.0f} deg'
                     cv2.putText(frame, f'Reps: {repetitions}', (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                     cv2.putText(frame, angle_text, (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
@@ -134,4 +155,4 @@ def analyze_video(input_path, output_path):
     if total_frames == 0:
         raise ValueError('The video contains no readable frames.')
 
-    return {'total_frames': total_frames, 'detected_frames': detected_frames, 'repetitions': repetitions, 'angles': angles}
+    return {'exercise': exercise, 'side': tracked_side, 'total_frames': total_frames, 'detected_frames': detected_frames, 'repetitions': repetitions, 'angles': angles}
